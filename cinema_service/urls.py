@@ -5,16 +5,14 @@ from django.conf import settings
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-
-    # >> TUDO que começar com /api/cinema/ vai para as rotas do app 'cinema'
     path("api/cinema/", include("cinema.urls")),
-
-    # Login/logout do DRF na API browser (útil para testes com sessão)
-    path("api-auth/", include("rest_framework.urls")),
+    path("api-auth/", include("rest_framework.urls")),  # login/logout do DRF
 ]
 
-# Debug Toolbar (apenas em DEBUG)
+# Debug Toolbar (apenas em desenvolvimento)
 if settings.DEBUG:
+    import debug_toolbar
+
     urlpatterns += [
-        path("__debug__/", include("debug_toolbar.urls")),
+        path("__debug__/", include(debug_toolbar.urls)),
     ]
