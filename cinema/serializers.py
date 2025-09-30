@@ -1,6 +1,7 @@
 from typing import List
-
+from django.db import IntegrityError, transaction
 from rest_framework import serializers
+
 
 from .models import (
     Actor,
@@ -290,3 +291,46 @@ class OrderSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         instance.tickets_list = instance.tickets.all().order_by("id")
         return super().to_representation(instance)
+
+
+class TicketCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Ticket
+        fields = ("row", "seat", "movie_session")
+
+
+class OrderCreateSerializer(serializers.ModelSerializer):
+    tickets = TicketCreateSerializer(many=True, write_only=True)
+
+    class Meta:
+        model = Order
+        fields = ("id", "tickets")
+        read_only_fields = ("id",)
+
+    def create(self, validated_data):
+        tickets_data = validated_data.pop("tickets", [])
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            raise serializers.ValidationError(
+                {"detail": "Authentication required to create orders."}
+            )
+
+        try:
+            with transaction.atomic():
+                order = Order.objects.create(user=user)
+                for ticket in tickets_data:
+                    Ticket.objects.create(order=order, **ticket)
+        except IntegrityError:
+            raise serializers.ValidationError(
+                {
+                    "tickets": [
+                        "Seat already taken for this movie session or invalid."
+                    ]
+                }
+            )
+        return order
+
+    def to_representation(self, instance):
+        # Reaproveita o serializer de leitura para a resposta do POST
+        return OrderSerializer(instance, context=self.context).data
