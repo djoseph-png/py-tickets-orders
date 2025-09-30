@@ -1,9 +1,10 @@
 from django.contrib import admin
+
 from .models import (
-    Genre,
     Actor,
-    Movie,
     CinemaHall,
+    Genre,
+    Movie,
     MovieSession,
     Order,
     Ticket,

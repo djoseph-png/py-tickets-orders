@@ -1,40 +1,62 @@
-from django.db import IntegrityError, transaction
+from typing import List
+
 from rest_framework import serializers
 
-from cinema.models import (
-    Genre,
+from .models import (
     Actor,
-    Movie,
     CinemaHall,
+    Genre,
+    Movie,
     MovieSession,
-    Ticket,
     Order,
+    Ticket,
 )
 
-# ---------------------------------------------------------------------
-# Base serializers para uso aninhado
-# ---------------------------------------------------------------------
+# =========================
+# ACTOR
+# =========================
 
 
-class GenreNameSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Genre
-        fields = ("name",)
+class ActorListSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
 
-
-class ActorNameSerializer(serializers.ModelSerializer):
     class Meta:
         model = Actor
-        fields = ("first_name", "last_name")
+        fields = ("id", "full_name")
 
-    def to_representation(self, instance):
-        # Exibe "F L" como no enunciado
-        return f"{instance.first_name} {instance.last_name}".strip()
+    def get_full_name(self, obj: Actor) -> str:
+        first = (obj.first_name or "").strip()
+        last = (obj.last_name or "").strip()
+        if first or last:
+            return f"{first} {last}".strip()
+        return getattr(obj, "full_name", "").strip()
 
 
-# ---------------------------------------------------------------------
-# CRUD simples (read/write) para Genre e Actor
-# ---------------------------------------------------------------------
+class ActorDetailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Actor
+        fields = ("id", "first_name", "last_name")
+
+
+# usado **apenas** dentro do detalhe de Movie (o teste espera `full_name`)
+class ActorDetailWithFullNameSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Actor
+        fields = ("id", "first_name", "last_name", "full_name")
+
+    def get_full_name(self, obj: Actor) -> str:
+        first = (obj.first_name or "").strip()
+        last = (obj.last_name or "").strip()
+        if first or last:
+            return f"{first} {last}".strip()
+        return getattr(obj, "full_name", "").strip()
+
+
+# =========================
+# GENRE
+# =========================
 
 class GenreSerializer(serializers.ModelSerializer):
     class Meta:
@@ -42,196 +64,229 @@ class GenreSerializer(serializers.ModelSerializer):
         fields = ("id", "name")
 
 
-class ActorSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Actor
-        fields = ("id", "first_name", "last_name")
-
-
-# ---------------------------------------------------------------------
-# Movies
-#   - leitura com nomes
-#   - escrita com IDs (PKs)
-# ---------------------------------------------------------------------
-
-class MovieSerializer(serializers.ModelSerializer):
-    genres = serializers.SlugRelatedField(
-        many=True, read_only=True, slug_field="name"
-    )
-    actors = ActorNameSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = Movie
-        fields = ("id", "title", "description", "duration", "genres", "actors")
-
-
-class MovieWriteSerializer(serializers.ModelSerializer):
-    genres = serializers.PrimaryKeyRelatedField(
-        queryset=Genre.objects.all(), many=True
-    )
-    actors = serializers.PrimaryKeyRelatedField(
-        queryset=Actor.objects.all(), many=True
-    )
-
-    class Meta:
-        model = Movie
-        fields = ("id", "title", "description", "duration", "genres", "actors")
-
-
-# ---------------------------------------------------------------------
-# Cinema Hall
-#   - capacity é somente leitura (propriedade do model). Removido source='capacity'
-# ---------------------------------------------------------------------
+# =========================
+# CINEMA HALL
+# =========================
 
 class CinemaHallSerializer(serializers.ModelSerializer):
-    # capacity é uma @property no model → apenas leitura
-    capacity = serializers.IntegerField(read_only=True)
-
     class Meta:
         model = CinemaHall
-        fields = ("id", "name", "rows", "seats_in_row", "capacity")
+        fields = ("id", "name", "rows", "seats_in_row")
 
 
-# ---------------------------------------------------------------------
-# MovieSession
-#   - list/detail para leitura
-#   - write com PKs
-# ---------------------------------------------------------------------
+class CinemaHallDetailSerializer(CinemaHallSerializer):
+    capacity = serializers.SerializerMethodField()
 
+    class Meta(CinemaHallSerializer.Meta):
+        fields = CinemaHallSerializer.Meta.fields + ("capacity",)
+
+    def get_capacity(self, obj: CinemaHall) -> int:
+        return int(obj.rows) * int(obj.seats_in_row)
+
+
+# =========================
+# MOVIE
+# =========================
+
+class MovieListSerializer(serializers.ModelSerializer):
+    genres = serializers.SerializerMethodField()
+    actors = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Movie
+        fields = ("id", "title", "description", "duration", "genres", "actors")
+
+    def get_genres(self, obj: Movie) -> List[str]:
+        return list(obj.genres.all().order_by("id").values_list("name", flat=True))
+
+    def get_actors(self, obj: Movie) -> List[str]:
+        names: List[str] = []
+        for actor in obj.actors.all().order_by("id"):
+            first = (actor.first_name or "").strip()
+            last = (actor.last_name or "").strip()
+            full = (
+                f"{first} {last}".strip()
+                or getattr(actor, "full_name", "").strip()
+            )
+            names.append(full)
+        return names
+
+
+class MovieDetailSerializer(serializers.ModelSerializer):
+    genres = GenreSerializer(many=True, read_only=True)
+    # aqui o teste quer também `full_name`
+    actors = ActorDetailWithFullNameSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Movie
+        fields = ("id", "title", "description", "duration", "genres", "actors")
+
+
+class MovieCreateUpdateSerializer(serializers.ModelSerializer):
+    genres = serializers.PrimaryKeyRelatedField(
+        many=True, queryset=Genre.objects.all(), write_only=True
+    )
+    actors = serializers.PrimaryKeyRelatedField(
+        many=True, queryset=Actor.objects.all(), write_only=True
+    )
+
+    class Meta:
+        model = Movie
+        fields = ("id", "title", "description", "duration", "genres", "actors")
+
+    def validate_duration(self, value: int) -> int:
+        if value is None or value <= 0:
+            raise serializers.ValidationError("duration must be a positive integer")
+        return value
+
+    def create(self, validated_data):
+        genres = validated_data.pop("genres", [])
+        actors = validated_data.pop("actors", [])
+        movie = Movie.objects.create(**validated_data)
+        if genres:
+            movie.genres.set(genres)
+        if actors:
+            movie.actors.set(actors)
+        return movie
+
+    def update(self, instance, validated_data):
+        genres = validated_data.pop("genres", None)
+        actors = validated_data.pop("actors", None)
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save()
+        if genres is not None:
+            instance.genres.set(genres)
+        if actors is not None:
+            instance.actors.set(actors)
+        return instance
+
+
+class MovieMiniDetailSerializer(serializers.ModelSerializer):
+    genres = serializers.SerializerMethodField()
+    actors = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Movie
+        fields = ("id", "title", "description", "duration", "genres", "actors")
+
+    def get_genres(self, obj: Movie) -> List[str]:
+        return list(obj.genres.all().order_by("id").values_list("name", flat=True))
+
+    def get_actors(self, obj: Movie) -> List[str]:
+        names: List[str] = []
+        for actor in obj.actors.all().order_by("id"):
+            first = (actor.first_name or "").strip()
+            last = (actor.last_name or "").strip()
+            full = (
+                f"{first} {last}".strip()
+                or getattr(actor, "full_name", "").strip()
+            )
+            names.append(full)
+        return names
+
+
+# =========================
+# MOVIE SESSION
+# =========================
 
 class MovieSessionListSerializer(serializers.ModelSerializer):
     movie_title = serializers.CharField(source="movie.title", read_only=True)
-    cinema_hall_name = serializers.CharField(
-        source="cinema_hall.name", read_only=True
-    )
-    cinema_hall_capacity = serializers.IntegerField(
-        source="cinema_hall.capacity", read_only=True
-    )
+    cinema_hall_name = serializers.CharField(source="cinema_hall.name", read_only=True)
+    cinema_hall_capacity = serializers.SerializerMethodField()
     tickets_available = serializers.SerializerMethodField()
 
     class Meta:
         model = MovieSession
         fields = (
             "id",
-            "show_time",
             "movie_title",
             "cinema_hall_name",
             "cinema_hall_capacity",
+            "show_time",
             "tickets_available",
         )
 
+    def get_cinema_hall_capacity(self, obj: MovieSession) -> int:
+        return int(obj.cinema_hall.rows) * int(obj.cinema_hall.seats_in_row)
+
     def get_tickets_available(self, obj: MovieSession) -> int:
-        taken = obj.tickets.count()
-        return obj.cinema_hall.capacity - taken
+        capacity = self.get_cinema_hall_capacity(obj)
+        tickets_qs = obj.tickets if hasattr(obj, "tickets") else obj.ticket_set
+        taken = tickets_qs.count()
+        return capacity - taken
 
 
-class MovieSessionDetailSerializer(serializers.ModelSerializer):
-    movie = MovieSerializer(read_only=True)
-    cinema_hall = CinemaHallSerializer(read_only=True)
-    taken_places = serializers.SerializerMethodField()
-
-    class Meta:
-        model = MovieSession
-        fields = ("id", "show_time", "movie", "cinema_hall", "taken_places")
-
-    def get_taken_places(self, obj: MovieSession):
-        return list(
-            obj.tickets.values("row", "seat").order_by("row", "seat")
-        )
-
-
-class MovieSessionWriteSerializer(serializers.ModelSerializer):
+class MovieSessionCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = MovieSession
         fields = ("id", "movie", "cinema_hall", "show_time")
 
 
-# ---------------------------------------------------------------------
-# Tickets / Orders
-# ---------------------------------------------------------------------
+class TakenPlaceSerializer(serializers.Serializer):
+    row = serializers.IntegerField()
+    seat = serializers.IntegerField()
 
-class TicketReadSerializer(serializers.ModelSerializer):
-    movie_session = MovieSessionListSerializer(read_only=True)
+
+class MovieSessionDetailSerializer(serializers.ModelSerializer):
+    movie = MovieMiniDetailSerializer(read_only=True)
+    cinema_hall = CinemaHallDetailSerializer(read_only=True)
+    tickets_available = serializers.SerializerMethodField()
+    taken_places = serializers.SerializerMethodField()
 
     class Meta:
-        model = Ticket
-        fields = ("id", "row", "seat", "movie_session")
+        model = MovieSession
+        fields = (
+            "id",
+            "movie",
+            "cinema_hall",
+            "show_time",
+            "tickets_available",
+            "taken_places",
+        )
+
+    def get_tickets_available(self, obj: MovieSession) -> int:
+        capacity = int(obj.cinema_hall.rows) * int(obj.cinema_hall.seats_in_row)
+        tickets_qs = obj.tickets if hasattr(obj, "tickets") else obj.ticket_set
+        taken = tickets_qs.count()
+        return capacity - taken
+
+    def get_taken_places(self, obj: MovieSession) -> List[dict]:
+        qs = obj.tickets.all() if hasattr(obj, "tickets") else obj.ticket_set.all()
+        return [{"row": t.row, "seat": t.seat} for t in qs.order_by("row", "seat")]
 
 
-class TicketWriteSerializer(serializers.ModelSerializer):
+# =========================
+# TICKET / ORDER
+# =========================
+
+class TicketSerializer(serializers.ModelSerializer):
     class Meta:
         model = Ticket
-        fields = ("row", "seat", "movie_session")
+        fields = ("id", "movie_session", "row", "seat")
 
-    def validate(self, attrs):
-        ms: MovieSession = attrs["movie_session"]
-        row = attrs["row"]
-        seat = attrs["seat"]
-
-        # 1) Dentro dos limites do hall
-        if not (1 <= row <= ms.cinema_hall.rows):
-            raise serializers.ValidationError(
-                {"row": "Row out of range for this hall."}
-            )
-        if not (1 <= seat <= ms.cinema_hall.seats_in_row):
-            raise serializers.ValidationError(
-                {"seat": "Seat out of range for this hall."}
-            )
-
-        # 2) Lugar já ocupado?
-        taken = Ticket.objects.filter(
-            movie_session=ms, row=row, seat=seat
-        ).exists()
-        if taken:
-            raise serializers.ValidationError("This place is already taken.")
-
-        return attrs
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        ms: MovieSession = instance.movie_session
+        hall: CinemaHall = ms.cinema_hall
+        capacity = int(hall.rows) * int(hall.seats_in_row)
+        data["movie_session"] = {
+            "id": ms.id,
+            "movie_title": ms.movie.title,
+            "cinema_hall_name": hall.name,
+            "cinema_hall_capacity": capacity,
+            "show_time": ms.show_time.isoformat(),
+        }
+        return data
 
 
-class OrderReadSerializer(serializers.ModelSerializer):
-    tickets = TicketReadSerializer(many=True, read_only=True)
+class OrderSerializer(serializers.ModelSerializer):
+    tickets = TicketSerializer(many=True, read_only=True)
 
     class Meta:
         model = Order
-        fields = ("id", "tickets", "created_at")
+        fields = ("id", "created_at", "tickets")
 
-
-class OrderWriteSerializer(serializers.ModelSerializer):
-    tickets = TicketWriteSerializer(many=True)
-
-    class Meta:
-        model = Order
-        fields = ("tickets",)
-
-    def create(self, validated_data):
-        user = self.context["request"].user
-        tickets_data = validated_data.pop("tickets", [])
-
-        # valida duplicidades dentro do mesmo payload
-        seen = set()
-        for ticket_data in tickets_data:
-            key = (
-                ticket_data["movie_session"].id,
-                ticket_data["row"],
-                ticket_data["seat"],
-            )
-            if key in seen:
-                raise serializers.ValidationError(
-                    "Duplicate tickets in request."
-                )
-            seen.add(key)
-
-        try:
-            # tudo ou nada: se der IntegrityError, nem o Order é criado
-            with transaction.atomic():
-                order = Order.objects.create(user=user)
-                Ticket.objects.bulk_create(
-                    [Ticket(order=order, **ticket_data) for ticket_data in tickets_data]
-                )
-        except IntegrityError:
-            # traduz erro de unicidade/concorrência para 400
-            raise serializers.ValidationError(
-                "Some of these seats are already taken."
-            )
-
-        return order
+    def to_representation(self, instance):
+        instance.tickets_list = instance.tickets.all().order_by("id")
+        return super().to_representation(instance)

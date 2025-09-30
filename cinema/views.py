@@ -1,141 +1,234 @@
-# cinema/views.py
-from datetime import date as date_cls
+import re
+from datetime import date
+from datetime import date as dt_date
+from datetime import datetime
 
-from rest_framework import permissions, viewsets
+from django.db.models import Prefetch, QuerySet
+from rest_framework import mixins, viewsets
+from rest_framework.pagination import PageNumberPagination
 
 from .models import (
-    Genre,
     Actor,
-    Movie,
     CinemaHall,
+    Genre,
+    Movie,
     MovieSession,
     Order,
 )
 from .serializers import (
-    GenreSerializer,
-    ActorSerializer,
-    MovieSerializer,
-    MovieWriteSerializer,
+    ActorDetailSerializer,
+    ActorListSerializer,
+    CinemaHallDetailSerializer,
     CinemaHallSerializer,
-    MovieSessionListSerializer,
+    GenreSerializer,
+    MovieCreateUpdateSerializer,
+    MovieDetailSerializer,
+    MovieListSerializer,
+    MovieSessionCreateUpdateSerializer,
     MovieSessionDetailSerializer,
-    MovieSessionWriteSerializer,
-    OrderReadSerializer,
-    OrderWriteSerializer,
+    MovieSessionListSerializer,
+    OrderSerializer,
 )
 
 
-class GenreViewSet(viewsets.ModelViewSet):
-    queryset = Genre.objects.all()
-    serializer_class = GenreSerializer
-    # permissions.AllowAny já é o padrão (via settings), mas deixo explícito:
-    permission_classes = [permissions.AllowAny]
+class DefaultPageNumberPagination(PageNumberPagination):
+    page_size = 100
+    page_size_query_param = "page_size"
+    max_page_size = 1000
 
+
+# =========================
+# ACTOR
+# =========================
 
 class ActorViewSet(viewsets.ModelViewSet):
-    queryset = Actor.objects.all()
-    serializer_class = ActorSerializer
-    permission_classes = [permissions.AllowAny]
-
-
-class MovieViewSet(viewsets.ModelViewSet):
-    queryset = Movie.objects.prefetch_related("genres", "actors").all()
-    permission_classes = [permissions.AllowAny]
-
-    def get_serializer_class(self):
-        if self.action in ("create", "update", "partial_update"):
-            return MovieWriteSerializer
-        return MovieSerializer
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-
-        title = self.request.query_params.get("title")
-        if title:
-            qs = qs.filter(title__icontains=title)
-
-        genres = self.request.query_params.get("genres")
-        if genres:
-            try:
-                ids = [int(x) for x in genres.split(",") if x.strip()]
-                if ids:
-                    qs = qs.filter(genres__id__in=ids)
-            except ValueError:
-                pass
-
-        actors = self.request.query_params.get("actors")
-        if actors:
-            try:
-                ids = [int(x) for x in actors.split(",") if x.strip()]
-                if ids:
-                    qs = qs.filter(actors__id__in=ids)
-            except ValueError:
-                pass
-
-        return qs.distinct()
-
-
-class CinemaHallViewSet(viewsets.ModelViewSet):
-    queryset = CinemaHall.objects.all()
-    serializer_class = CinemaHallSerializer
-    permission_classes = [permissions.AllowAny]
-
-
-class MovieSessionViewSet(viewsets.ModelViewSet):
-    queryset = (
-        MovieSession.objects.select_related("movie", "cinema_hall")
-        .prefetch_related("tickets")
-        .all()
-    )
-    permission_classes = [permissions.AllowAny]
-    # IMPORTANT: sem paginação aqui para os testes não quebrarem com KeyError: 0
+    queryset = Actor.objects.all().order_by("id")
     pagination_class = None
 
     def get_serializer_class(self):
-        if self.action == "list":
-            return MovieSessionListSerializer
+        if self.action in ("retrieve", "create", "update", "partial_update"):
+            return ActorDetailSerializer
+        return ActorListSerializer
+
+
+# =========================
+# GENRE
+# =========================
+
+class GenreViewSet(viewsets.ModelViewSet):
+    queryset = Genre.objects.all().order_by("id")
+    serializer_class = GenreSerializer
+    pagination_class = None
+
+
+# =========================
+# CINEMA HALL
+# =========================
+
+class CinemaHallViewSet(viewsets.ModelViewSet):
+    queryset = CinemaHall.objects.all().order_by("id")
+    pagination_class = None
+
+    def get_serializer_class(self):
         if self.action == "retrieve":
-            return MovieSessionDetailSerializer
-        return MovieSessionWriteSerializer
+            return CinemaHallDetailSerializer
+        return CinemaHallSerializer
+
+
+# =========================
+# MOVIE
+# =========================
+
+class MovieViewSet(viewsets.ModelViewSet):
+    pagination_class = None
+
+    def get_serializer_class(self):
+        if self.action in ("create", "update", "partial_update"):
+            return MovieCreateUpdateSerializer
+        if self.action == "retrieve":
+            return MovieDetailSerializer
+        return MovieListSerializer
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = Movie.objects.all().order_by("id").prefetch_related(
+            Prefetch("genres", queryset=Genre.objects.all().order_by("id")),
+            Prefetch("actors", queryset=Actor.objects.all().order_by("id")),
+        )
 
-        movie_id = self.request.query_params.get("movie")
-        if movie_id and movie_id.isdigit():
-            qs = qs.filter(movie_id=int(movie_id))
+        actor_id = self.request.query_params.get("actors")
+        genre_id = self.request.query_params.get("genres")
+        title = self.request.query_params.get("title")
 
-        date_str = self.request.query_params.get("date")
-        if date_str:
+        if actor_id:
             try:
-                date = date_cls.fromisoformat(date_str)  # YYYY-MM-DD
-                qs = qs.filter(show_time__date=date)
+                qs = qs.filter(actors__id=int(actor_id))
             except ValueError:
-                pass  # data inválida -> ignora filtro
+                pass
+
+        if genre_id:
+            try:
+                qs = qs.filter(genres__id=int(genre_id))
+            except ValueError:
+                pass
+
+        if title:
+            qs = qs.filter(title__icontains=title)
 
         return qs
 
 
-class OrderViewSet(viewsets.ModelViewSet):
-    """
-    Lista/cria pedidos do usuário autenticado.
-    Mantém protegido, mesmo com DEFAULT AllowAny.
-    """
-    permission_classes = [permissions.IsAuthenticated]
+# =========================
+# MOVIE SESSION
+# =========================
 
-    def get_queryset(self):
-        return (
-            Order.objects.filter(user=self.request.user)
-            .prefetch_related(
-                "tickets",
-                "tickets__movie_session",
-                "tickets__movie_session__movie",
-                "tickets__movie_session__cinema_hall",
-            )
-            .order_by("-created_at")
-        )
+def _parse_date_param(raw: str):
+    if not raw:
+        return None
+    st = str(raw).strip().replace("Z", "+00:00")
+
+    # 1) qualquer "YYYY-MM-DD" embutido
+    mo = re.search(r"(\d{4})-(\d{2})-(\d{2})", st)
+    if mo:
+        return dt_date(int(mo.group(1)), int(mo.group(2)), int(mo.group(3)))
+
+    # 2) "DD-MM-YYYY"
+    mo = re.search(r"(\d{2})-(\d{2})-(\d{4})", st)
+    if mo:
+        return dt_date(int(mo.group(3)), int(mo.group(2)), int(mo.group(1)))
+
+    # 3) barras "YYYY/MM/DD" ou "DD/MM/YYYY"
+    mo = re.search(r"(\d{4})/(\d{2})/(\d{2})", st)
+    if mo:
+        return dt_date(int(mo.group(1)), int(mo.group(2)), int(mo.group(3)))
+    mo = re.search(r"(\d{2})/(\d{2})/(\d{4})", st)
+    if mo:
+        return dt_date(int(mo.group(3)), int(mo.group(2)), int(mo.group(1)))
+
+    # 4) ISO puro de date
+    try:
+        return dt_date.fromisoformat(st)
+    except Exception:
+        pass
+
+    # 5) datetime ISO (com ou sem timezone)
+    try:
+        return datetime.fromisoformat(st).date()
+    except Exception:
+        pass
+
+    # 6) último recurso: antes do espaço/T
+    try:
+        head = st.split("T")[0].split(" ")[0]
+        return dt_date.fromisoformat(head)
+    except Exception:
+        return None
+
+
+class MovieSessionViewSet(viewsets.ModelViewSet):
+    queryset = MovieSession.objects.select_related("movie", "cinema_hall").all()
+    pagination_class = None
 
     def get_serializer_class(self):
-        if self.action == "create":
-            return OrderWriteSerializer
-        return OrderReadSerializer
+        if self.action in ("create", "update", "partial_update"):
+            return MovieSessionCreateUpdateSerializer
+        if self.action == "retrieve":
+            return MovieSessionDetailSerializer
+        return MovieSessionListSerializer
+
+    def get_queryset(self) -> QuerySet:
+        qs = super().get_queryset()
+        params = getattr(self.request, "query_params", {})
+
+        movie_param = params.get("movie")
+        date_param = params.get("date")
+
+        # Filtrar por movie id se válido
+        if movie_param:
+            try:
+                movie_id = int(movie_param)
+                qs = qs.filter(movie_id=movie_id)
+            except (TypeError, ValueError):
+                # Se não for inteiro, não retorna nada para manter semântica previsível
+                qs = qs.none()
+
+        # Filtrar por data (aceitando YYYY-MM-DD ou YYYY-M-D)
+        if date_param:
+            parsed_date = None
+            # Tentar com zero à esquerda
+            for fmt in ("%Y-%m-%d", "%Y-%m-%d"):
+                try:
+                    parsed_date = datetime.strptime(date_param, fmt).date()
+                    break
+                except ValueError:
+                    pass
+            if parsed_date is None:
+                # Tentar formato flexível YYYY-M-D
+                try:
+                    y, m, d = date_param.split("-")
+                    parsed_date = date(int(y), int(m), int(d))
+                except Exception:
+                    parsed_date = None
+            if parsed_date is not None:
+                qs = qs.filter(show_time__date=parsed_date)
+            else:
+                # Se data inválida, não retorna nada (evita passar registros indevidos)
+                qs = qs.none()
+
+        return qs
+
+
+# =========================
+# ORDER
+# =========================
+
+class OrderViewSet(mixins.ListModelMixin,
+                   mixins.CreateModelMixin,
+                   viewsets.GenericViewSet):
+    queryset = Order.objects.all().order_by("id").prefetch_related(
+        "tickets",
+        "tickets__movie_session",
+        "tickets__movie_session__movie",
+        "tickets__movie_session__cinema_hall",
+    )
+    serializer_class = OrderSerializer
+    pagination_class = DefaultPageNumberPagination

@@ -1,18 +1,16 @@
-# cinema_service/urls.py
-from django.contrib import admin
-from django.urls import path, include
 from django.conf import settings
+from django.contrib import admin
+from django.urls import include, path
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("api/cinema/", include("cinema.urls")),
-    path("api-auth/", include("rest_framework.urls")),  # login/logout do DRF
+    path("", include("cinema.urls")),
 ]
 
-# Debug Toolbar (apenas em desenvolvimento)
 if settings.DEBUG:
-    import debug_toolbar
-
-    urlpatterns += [
-        path("__debug__/", include(debug_toolbar.urls)),
-    ]
+    try:
+        import debug_toolbar  # type: ignore
+    except Exception:
+        pass
+    else:
+        urlpatterns += [path("__debug__/", include("debug_toolbar.urls"))]
